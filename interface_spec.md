@@ -1,9 +1,9 @@
 # Life Update Radio パイプライン インターフェース仕様書
 
-バージョン: 1.3.0
+バージョン: 1.2.0
 作成日: 2026-04-26
-最終更新: 2026-05-02
-ステータス: 確定（Phase 2 リサーチ側 + Phase 3 structured_facts 台本側参照を実装完了）
+最終更新: 2026-05-01
+ステータス: 確定（Phase 2 実装完了・Hybrid 構成ベンチマーク反映済み）
 
 ---
 
@@ -124,12 +124,11 @@ research_content（全文）
 
 ---
 
-## 3. structured_facts フィールド（Phase 2 リサーチ側 + Phase 3 台本側 参照 実装済み）
+## 3. structured_facts フィールド（Phase 2 実装済み）
 
 台本側調査で判明した最大の課題は「情報の圧縮損失」です。
 これを解決するためにresearch_brief.jsonに構造化ファクトを追加しました。
-Phase 2（リサーチ側）で実装完了、Phase 3（台本側参照）も
-2026-05-02 に実装完了しました（§3.4 / §5 Phase 3 参照）。
+Phase 2（リサーチ側）で実装完了し、台本側からの参照を待つ状態です。
 
 ### 3.1 structured_facts フィールド定義
 
@@ -211,50 +210,33 @@ Phase 2（リサーチ側）で実装完了、Phase 3（台本側参照）も
 - research_content は 7,096 文字（v1.0 目標 15,000 字には未達）
 - Pass3 補完が 3 回試行されても 8,000 字に届かず → 別途要改善
 
-### 3.4 台本側実装（Phase 3 / 2026-05-02 完了）
+#### 3.3.1 Hybrid 構成 (Pass1=deepseek-r1:14b / Pass2/3=qwen2.5:72b) のベンチマーク
 
-リサーチ側が出力する `structured_facts` を、台本側 `auto_radio_generator` が
-ScriptOrchestrator Step 0.5 で読み取り、`FactExtractor` を完全にスキップして
-`FactSheet` を直接生成し `TopicCurator` に渡す経路を実装。
+2026-05-01 時点。`config.OLLAMA_ENDPOINTS` で stage_key 単位に振り分け:
+- stage1 / stage3_pass1: Mac Studio ローカルの deepseek-r1:14b 直接呼出
+- stage3_pass2 / stage3_pass3: Proxy (port 11435) 経由で GX10 (192.168.0.73:11434) の qwen2.5:72b に転送
 
-**実装内容**:
+同一テーマ・同一 angle (「睡眠と免疫」 / mode=lecture / angle=「睡眠不足で免疫力がこんなに低下する」) で 3 構成を実測:
 
-- `core/models/artifacts.py`: `ResearchBrief.structured_facts: Optional[Dict[str, Any]]`
-  を追加（Pydantic Optional・既定 None で後方互換維持）
-- `core/models/fact_sheet.py`: `FactSheet.from_structured_facts(dict) -> FactSheet`
-  クラスメソッドを新設
-- `core/interfaces/researcher.py`: `ResearchResult` dataclass に `structured_facts`
-  フィールドを追加（`research_brief → research_data` の搬送経路）
-- `services/pipeline/scripting_phase.py`: ResearchResult 構築点で伝播
-- `services/script_generation/orchestrator.py` Step 0.5: 優先順位を整理
-  1. `preset_fact_sheet`（HITL 編集済み） > 即採用
-  2. `research_data.structured_facts`（リサーチ側事前抽出）> `from_structured_facts`
-     で変換し FactExtractor をスキップ
-  3. `fact_extractor.enabled` かつ Curator が走る場合 > FactExtractor 実行
-  4. それ以外 > `fact_sheet=None`
+| 指標 | deepseek-r1:14b 単独 | qwen2.5:72b 単独 | **Hybrid** | v1.0 目標 | v2.0 目標 |
+|---|---:|---:|---:|---:|---:|
+| 実行時間 | 24分41秒 | 69分01秒 | **51分21秒** | — | — |
+| research_content 文字数 | 7,096 | 10,136 | **9,879** | 15,000 | 20,000 |
+| ソース数 | 20 | 20 | 25 | — | — |
+| key_numbers | 9 | 8 | **14** | 5 以上 | 15 以上 |
+| key_entities | 10 | 1 | **6** | 5 以上 | 15 以上 |
+| surprising_claims | 3 | 4 | **3** | 2 以上 | 5 以上 |
+| controversies | 4 | 0 | **6** | 1 以上 | 3 以上 |
 
-**変換マッピング**（interface_spec.md 3.1 → ExtractedFact）:
+**判定**:
+- Hybrid 構成は key_numbers / key_entities / surprising_claims / controversies の全項目で v1.0 最低基準をクリア
+- key_numbers 14 件は v2.0 目標 (15 件以上) の直前まで到達。controversies 6 件は v2.0 目標 (3 件以上) を超過
+- qwen2.5:72b 単独で発生していた構造化ファクトの崩壊 (key_entities=1, controversies=0) を Pass1 を deepseek-r1:14b に切り替えることで回避
+- 実行時間は qwen2.5:72b 単独比で −1,060 秒 (−25%) の改善。長文生成ボリュームは qwen2.5:72b 単独 (10,136 字) とほぼ同水準を維持
 
-| structured_facts のサブフィールド | FactCategory | surprise_score | source 引用保持 |
-|---|---|---|---|
-| `key_numbers` | 数値 | 7 | `source_idx` → `[N]` 形式で `source_citation` |
-| `key_entities` | type で分岐（人物 / 定義 / 技術 / イベント / その他） | 5 | 同上 |
-| `surprising_claims` | その他 | 9 | 同上 |
-| `controversies` | 比較 | 7 | `source_indices` → `[N,M]` 形式 |
-
-**実機検証**（2026-05-02 / Ollama qwen3:32b）:
-
-| 検証項目 | 結果 |
-|---|---|
-| Step 0.5 で structured_facts → FactSheet 変換 | ✅ ログに「FactExtractor スキップ」「FactSheet 構築 (facts=13)」 |
-| FactExtractor LLM 呼び出し回数 | ✅ ゼロ（合成 structured_facts 13 件 → そのまま FactSheet 13 件） |
-| TopicCurator が選定したトピックに数値含有 | ✅ 3 トピックすべてに数値（20% / 18% vs 25% / 5%・1.5倍） |
-| 台本本文 43 ターン中の数値・固有名詞 | ✅ 数値 41 個、BMI 4 回、HIIT 4 回、アディポ 3 回 等 |
-| `facts=[]` 系エラー発生 | ✅ ゼロ |
-
-**失敗時の挙動**: `from_structured_facts` 変換中に例外が出た場合は、防御的に
-FactExtractor へフォールバック（後方互換維持）。`structured_facts=None` /
-不在の場合も従来通り FactExtractor を実行する。
+**役割分担の根拠**:
+- 構造化抽出 (Pass1): JSON 出力の安定性と固有名詞・数値の網羅性で deepseek-r1:14b が優位
+- 長文生成 (Pass2/3): 文章の流暢さ・セクション構成の一貫性で qwen2.5:72b が優位
 
 ---
 
@@ -322,11 +304,9 @@ FactExtractor へフォールバック（後方互換維持）。`structured_fac
 ### Phase 3（台本側対応）
 ```
 [ ] angleをResearchResult経由で伝播
-[x] structured_factsをTopicCuratorに渡す（2026-05-02 実装完了 / §3.4 参照）
+[ ] structured_factsをTopicCuratorに渡す
 [ ] snippetを有効化
 期待効果: 番組コンセプトの全層伝達・引用追跡
-実測効果: structured_facts 経路は実機検証で facts=[] ゼロ・数値固有名詞含む
-         台本生成を 1 本完走（§3.4 末尾の検証表）
 ```
 
 ### Phase 4（拡張）
@@ -346,4 +326,4 @@ FactExtractor へフォールバック（後方互換維持）。`structured_fac
 | 0.1.0 | 2026-04-26 | 骨子作成（ドラフト） |
 | 1.0.0 | 2026-04-26 | 台本側調査結果を反映・全文更新 |
 | 1.1.0 | 2026-04-28 | Phase 2 実装完了を反映。§3.3 にリサーチ側テスト実測値（key_numbers=9 / key_entities=10 / surprising_claims=3 / controversies=4）を追記 |
-| 1.3.0 | 2026-05-02 | Phase 3 のうち「structured_facts を TopicCurator に渡す」が台本側で実装完了。§3.4 を新設し台本側実装内容（ResearchBrief / FactSheet / ScriptOrchestrator Step 0.5 の変更点・変換マッピング・実機検証結果）を追記。§5 Phase 3 のチェックボックスを更新。残タスク（angle 伝播・snippet 有効化）は引き続き未実装 |
+| 1.2.0 | 2026-05-01 | §3.3.1 を新設し Hybrid 構成 (Pass1=deepseek-r1:14b / Pass2/3=qwen2.5:72b) のベンチマーク実測値を追加。3 構成 (deepseek 単独 / qwen 単独 / Hybrid) の比較表を反映 |
