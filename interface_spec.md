@@ -1,9 +1,9 @@
 # Life Update Radio パイプライン インターフェース仕様書
 
-バージョン: 1.3.0
+バージョン: 1.4.0
 作成日: 2026-04-26
 最終更新: 2026-05-03
-ステータス: 確定（Phase 2 リサーチ側 + Hybrid ベンチマーク + Phase 3 structured_facts 台本側参照を実装完了）
+ステータス: 確定（Phase 2 リサーチ側 + Hybrid ベンチマーク + Phase 3 structured_facts 台本側参照を実装完了 / GX10 推論インフラ確定）
 
 ---
 
@@ -37,6 +37,40 @@ research_content（全文）
 ```
 
 **重要**: research_contentの品質が台本品質を決定する最大の要因
+
+### 0.2 推論インフラ構成（2026-05-03 確定）
+
+```
+┌─────────────────────────────┐         ┌──────────────────────────────┐
+│ Mac Studio                  │         │ GX10 (192.168.0.73)          │
+│  ├ Ollama (port 11434)      │         │  └ vLLM (port 8000)          │
+│  │   └ deepseek-r1:14b      │         │      └ Qwen3-Next-80B-A3B-   │
+│  │     [Pass1]              │         │        Instruct-NVFP4        │
+│  │                          │         │        served-model-name:    │
+│  └ Mac Studio Proxy         │ ──────▶ │        qwen3-next-80b        │
+│    (port 11435)             │ Ollama  │        [Pass2 / Pass3]       │
+│    Ollama→OpenAI 変換ブリッジ │ 形式 →   │                              │
+│                             │ OpenAI  │                              │
+│                             │ 形式    │                              │
+└─────────────────────────────┘         └──────────────────────────────┘
+```
+
+**役割分担**:
+
+| ステージ | モデル | エンドポイント | プロトコル |
+|---|---|---|---|
+| stage1 / stage3_pass1 | `deepseek-r1:14b` | Mac Studio `localhost:11434` (Ollama 直叩き) | Ollama 形式 |
+| stage3_pass2 / stage3_pass3 | `Qwen3-Next-80B-A3B-Instruct-NVFP4` (`served-model-name: qwen3-next-80b`) | Mac Studio Proxy `localhost:11435` → GX10 `192.168.0.73:8000` (vLLM) | クライアントは Ollama 形式 / Proxy が OpenAI 形式 (`/v1/chat/completions`) に変換して GX10 vLLM へ転送 |
+
+**ポート規約**:
+- vLLM: port 8000 （GX10 側）
+- Ollama: port 11434 （Mac Studio 側 / GX10 側ともに従来 Ollama を使う場合は同一）
+- Mac Studio Proxy: port 11435 （vLLM 変換ブリッジ）
+
+**ブリッジの役割**: 既存のリサーチパイプラインは Ollama 互換 API を呼び出す前提で実装済み。
+Proxy (port 11435) が `/api/chat` 等の Ollama 形式リクエストを受けて OpenAI 形式 (`/v1/chat/completions`) に
+変換し、GX10 の vLLM (port 8000) に転送する。これにより既存コードを書き換えずに NVFP4 量子化された
+80B モデルを利用できる。
 
 ---
 
@@ -239,6 +273,24 @@ Phase 2（リサーチ側）で実装完了、Phase 3（台本側参照）も
 - 構造化抽出 (Pass1): JSON 出力の安定性と固有名詞・数値の網羅性で deepseek-r1:14b が優位
 - 長文生成 (Pass2/3): 文章の流暢さ・セクション構成の一貫性で qwen2.5:72b が優位
 
+#### 3.3.2 Qwen3-Next-80B ベンチマーク確定値 (2026-05-03)
+
+§0.2 の確定インフラ構成 (Pass1=deepseek-r1:14b @ Mac Studio Ollama / Pass2/3=Qwen3-Next-80B-A3B-Instruct-NVFP4 @ GX10 vLLM) で、§3.3.1 と同一のテーマ・angle (「睡眠と免疫」 / mode=lecture) を実測:
+
+| 指標 | Hybrid (qwen2.5:72b) | **Hybrid (Qwen3-Next-80B)** | v1.0 目標 | v2.0 目標 |
+|---|---:|---:|---:|---:|
+| 実行時間 | 51分21秒 | **17分34秒** | — | — |
+| research_content 文字数 | 9,879 | **17,409** | 15,000 | 20,000 |
+| key_numbers | 14 | **21** | 5 以上 | 15 以上 |
+
+**判定**:
+- research_content 17,409 字は v1.0 目標 (15,000 字) を 2,409 字 (約 16%) 超過。v2.0 目標 (20,000 字) まで残り 2,591 字
+- key_numbers 21 件は v2.0 目標 (15 件以上) を 6 件超過
+- 実行時間 17分34秒は qwen2.5:72b Hybrid 比で −2,027 秒 (−66%)。NVFP4 量子化と vLLM の連続バッチング・PagedAttention により大幅短縮
+- v1.0 目標 (15,000 字) を初めて単体実行で突破した構成。これをもって Phase 2 の文字数未達課題 (§5 Phase 2 の "文字数は 7,096 字に留まり目標未達 → 継続改善") は実質解消
+
+**今後の主戦構成**: 本構成 (Pass1=deepseek-r1:14b / Pass2/3=Qwen3-Next-80B) を当面のデフォルトとして運用する。
+
 ### 3.4 台本側実装（Phase 3 / 2026-05-02 完了）
 
 リサーチ側が出力する `structured_facts` を、台本側 `auto_radio_generator` が
@@ -380,3 +432,4 @@ FactExtractor へフォールバック（後方互換維持）。`structured_fac
 | 1.1.0 | 2026-04-28 | Phase 2 実装完了を反映。§3.3 にリサーチ側テスト実測値（key_numbers=9 / key_entities=10 / surprising_claims=3 / controversies=4）を追記 |
 | 1.2.0 | 2026-05-01 | §3.3.1 を新設し Hybrid 構成 (Pass1=deepseek-r1:14b / Pass2/3=qwen2.5:72b) のベンチマーク実測値を追加。3 構成 (deepseek 単独 / qwen 単独 / Hybrid) の比較表を反映 |
 | 1.3.0 | 2026-05-03 | Phase 3 のうち「structured_facts を TopicCurator に渡す」が台本側で実装完了。§3.4 を新設し台本側実装内容（ResearchBrief / FactSheet / ScriptOrchestrator Step 0.5 の変更点・変換マッピング・実機検証結果）を追記。§5 Phase 3 のチェックボックスを更新。残タスク（angle 伝播・snippet 有効化）は引き続き未実装。注: 元々 2026-05-02 に commit 69d0a45 として一度仕様書に反映していたが、リサーチ側 v1.2.0 (commit c05b993) が 69d0a45 を上書きする形で進められたため、本コミットで §3.3.1 (Hybrid) と §3.4 (Phase 3) を改めて統合 |
+| 1.4.0 | 2026-05-03 | §0.2 を新設し GX10 推論インフラを確定 (vLLM port 8000 / Ollama port 11434 / Mac Studio Proxy port 11435 が Ollama 形式→OpenAI 形式に変換して GX10 vLLM へ転送 / Pass1=deepseek-r1:14b @ Mac Studio Ollama / Pass2/3=Qwen3-Next-80B-A3B-Instruct-NVFP4 @ GX10 vLLM, served-model-name=qwen3-next-80b)。§3.3.2 を新設し Qwen3-Next-80B 構成のベンチマーク確定値を反映 (実行時間 17分34秒 / research_content 17,409 字 / key_numbers 21 件)。research_content が初めて v1.0 目標 (15,000 字) を単体実行で突破し、key_numbers は v2.0 目標 (15 件以上) を超過 |
