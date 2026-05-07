@@ -1,5 +1,5 @@
 Life Update Radio パイプライン インターフェース仕様書
-バージョン: 1.6.0-rc 作成日: 2026-04-26 最終更新: 2026-05-07 ステータス: v1.6 実装待ち（Phase A+B を 5/7-5/9 で実装予定）
+バージョン: 1.6.0 作成日: 2026-04-26 最終更新: 2026-05-07 ステータス: v1.6 リサーチ側実装完了（structured_facts に confidence / cross_validated_sources / flags 付与、実機ベンチマーク検証済）
 
 0. 全体像
 [リサーチパイプライン] (Mac Studio / research_pipeline)
@@ -422,6 +422,7 @@ Phase 6（v1.7+ 議論予定）: 拡張フラグと publication_date
 1.4.0	2026-05-03	§0.2 を新設し GX10 推論インフラを確定 (vLLM port 8000 / Ollama port 11434 / Mac Studio Proxy port 11435 が Ollama 形式→OpenAI 形式に変換して GX10 vLLM へ転送 / Pass1=deepseek-r1:14b @ Mac Studio Ollama / Pass2/3=Qwen3-Next-80B-A3B-Instruct-NVFP4 @ GX10 vLLM, served-model-name=qwen3-next-80b)
 1.5.0	2026-05-06	§7（ベンチマーク基準値）・§8（Variance 観測）・§9（推奨ベンチマークテーマ）を新設。リサーチ側 benchmark_themes.py (5 テーマ × repeat 3 = 15 ラン) の実測値: 平均 17 分 7 秒 / research_content 27,565 字 / key_numbers 23.7 件 / KV ピーク 12.3% を基準値として記録
 1.6.0-rc	2026-05-07	§3.1 に v1.6 拡張フィールド (confidence / cross_validated_sources / flags) を追加。§3.1.1, §3.1.2 を新設し各フィールドの仕様と判定ロジック実装方針を記載。§5 Phase 5 を新設し v1.6 ロードマップを定義。§5 Phase 6 を新設し v1.7+ 拡張議論項目を整理。§10 を新設し radio_director (Mac Studio 新パイプライン) との協調設計を記載。§4.3 の責任分担に v1.6 の confidence/flags 担保項目を追加
+1.6.0	2026-05-07	research_pipeline 側で v1.6 拡張フィールドの実装が完了。models.py の KeyNumber/KeyEntity/SurprisingClaim に Optional 3 フィールド追加、stage3_synthesize.py の _merge_structured_facts に cross_validated_sources マージ・confidence 判定 (high: cvs>=2 / medium: cvs==1 かつ tier_score>=60 / low: それ以外)・highly_specific フラグ判定 (key_numbers のみ・小数3桁以上または100万以上で末尾000以外) を実装。pytest 単体テスト 19 ケース全 PASS、後方互換 (v1.5 brief 5 件再パース成功)、実機スモーク (テーマ「睡眠と免疫」/ 23m32s / 全 116 fact に v1.6 メタデータ付与) で検証完了。
 
 7. ベンチマーク基準値（2026-05-06 実施）
 リサーチ側 benchmark_themes.py を用いた 5 テーマ × repeat 3 = 15 ラン の実測値。並列度は Pass1=8 / Pass2=5 構成（vLLM proxy 経由で qwen3.5-122b を使用）。今後の設定変更比較におけるベースラインとして本値を参照する。
