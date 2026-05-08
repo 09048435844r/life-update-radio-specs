@@ -1,9 +1,9 @@
 # radio_director 設計仕様書
 
-**バージョン**: 1.2.0
+**バージョン**: 1.3.0
 **作成日**: 2026-05-07
 **最終更新**: 2026-05-08
-**ステータス**: Phase A プロトタイプ完成 / Phase B 設計準備完了
+**ステータス**: Phase A・B プロトタイプ完成 / Phase C 設計準備完了
 **対象**: Mac Studio で構築する新台本生成パイプライン `radio_director`
 **経緯**: 既存 `auto_radio_generator` (Windows) のコードベース肥大化と複数の改善試行失敗を踏まえ、ゼロベース再設計
 
@@ -1743,6 +1743,7 @@ v1.6 完成後の活用:
 | 1.0.0 | 2026-05-07 | v1.6 最終合意事項を反映、ハードウェア前提・データ共有パッケージ・役割分担を確定（セクション 19）。GitHub 管理開始 |
 | 1.1.0 | 2026-05-07 | research_pipeline 側の v1.6 実装が当初予定（5/9末）より2日前倒しで完了。実機データを受領し設計に反映（セクション 21） |
 | 1.2.0 | 2026-05-08 | radio_director Phase A プロトタイプ完成（28/28 PASS、実機データで sufficient 判定）。research_pipeline からの Phase B 設計向け事前情報を受領し記録（セクション 22）。トークン数肥大化対策、priority スコア付与の設計判断、angle 不整合対応方針を確定 |
+| 1.3.0 | 2026-05-08 | radio_director Phase B プロトタイプ完成（53/53 ユニット PASS、1/1 統合 PASS、114秒で完走）。実機データで end-to-end 動作確認（セクション 23）。重要な発見: vLLM max_model_len=32,768 制約、LLM の AAA tier 選好。設計妥当性が確認された5項目を記録 |
 
 ---
 
@@ -2055,6 +2056,132 @@ C. 全件採用、Phase B プロンプトで「angle 中心に」と指示する
 
 - §13.2: トークン数肥大化対策と選定ロジックの追記
 - §13.5: トークン数の見積もりを追加（116 fact × 平均長 → 概算）
+
+---
+
+## 23. Phase B プロトタイプ実機検証結果（2026-05-08）
+
+Phase B プロトタイプ完成後、実機 LLM (Qwen3.5-122B-A10B-NVFP4) で
+end-to-end 検証を実施。
+
+### 23.1 検証実行サマリ
+
+```
+実行環境:
+- vLLM (Mac Studio Proxy 経由 / GX10)
+- Qwen3.5-122B-A10B-NVFP4
+- max_model_len: 32,768
+- max-num-seqs: 8
+
+入力: research_brief_20260507_230040.json (Phase A 出力)
+テーマ: 睡眠と免疫
+angle: 寝不足が『風邪』を呼ぶ？睡眠時間が免疫細胞の数を劇的に減らす最新データ
+```
+
+### 23.2 §22.5 検証項目への対応（実測値）
+
+| 指標 | 実測値 | 備考 |
+|---|---|---|
+| elapsed_sec | 114.1 | Phase A 0.06s に LLM コール時間が加算 |
+| prompt_chars | 51,230 | structured_facts 全件 + research_content 全文 |
+| approx_prompt_tokens | 25,615 | chars/2 で概算 |
+| max_tokens | 4,096 | 8,192 から削減（context 制約対応） |
+| topics_count | 3 | min=2/max=4 の中央値、揺らぎなし |
+| total_claims | 9 | 各 topic 3 件 |
+| 全 claim の tier | AAA × 9 | LLM が AAA tier を強く選好 |
+
+### 23.3 重要な発見1: vLLM max_model_len の制約
+
+**当初設計**: max_tokens=8,192 で運用予定
+**実機での問題**: prompt(25,615) + max_tokens(8,192) = 33,807 で context overflow（400 Bad Request）
+
+**調査結果**:
+- Qwen3.5-122B-A10B-NVFP4 自体は 256K context を扱える能力を持つ
+- 現在の vLLM サーバー設定で max_model_len=32,768 に制限されている
+- KV cache の容量制約のため
+
+**radio_director の対応**:
+- max_tokens を 4,096 に削減（commit `51f64a8`）
+- ShowSpec 出力は 4-6K chars (2-3K tokens) なので 4,096 で十分余裕
+- 32K context で動作確認済み
+
+**将来的な検討事項**:
+Phase C/D で並列実行や context 引き継ぎが必要になった時、研究側に
+max_model_len=64K への拡張を相談する余地あり。KV cache vs 並列度の
+トレードオフを実機データで判断する。
+
+### 23.4 重要な発見2: LLM の AAA tier 選好
+
+**観察**: 全 9 claim が AAA tier から選定された
+**実機データの内訳**:
+```
+sources: 44件 (AAA=23 / A=2 / B=19)
+LLM の選択: AAA × 9 (B tier の 19 件を完全に避けた)
+```
+
+**評価**:
+- ✅ ハルシネーション抑制としては設計通り
+- ❓ 情報の多様性（特に AA/A tier の活用）は今後の課題
+- B tier ソースが多いテーマでは選択肢が限定される可能性
+
+**今後の観察ポイント**:
+- 別テーマ（特に B tier 比率が高いテーマ）での挙動
+- Phase C で対話の多様性を実装する際の影響
+- Phase D で「複数 tier の組み合わせ」を促す設計の必要性
+
+### 23.5 設計の妥当性が確認された項目
+
+```
+✅ structured_facts 主軸の制約が機能
+   - research_content からの数値・固有名詞の混入なし（目視確認）
+
+✅ angle 貫通使用が機能
+   - 入力 angle が出力 ShowSpec に完全転記
+   - 再解釈・改善なし
+
+✅ 出典タグルール ([AAA]/[AA]/[A]/[B]) が機能
+   - 各 claim にタグが付与されている
+
+✅ topics 件数の min=2/max=4 が機能
+   - 揺らぎなく中央値の 3 が出力された
+
+✅ 「ディレクターとして書け」フレーミングが機能
+   - 魅力的な title 生成（「寝不足は『風邪』を呼ぶ？免疫細胞が7割減る衝撃の真実」）
+```
+
+### 23.6 v1.7 dedup 改善の優先度判断
+
+研究側が知りたかった3点（§16 注意事項1-4 関連）への回答:
+
+```
+Q1: confidence=medium 中心で動く台本品質の実態
+A1: 実用的に動作。Phase B レベルでは confidence への依存度は低い
+
+Q2: domain_tier ベースの判定が実用的に機能するか
+A2: 機能している（出典タグ生成）。ただし AAA に強く偏る傾向あり
+
+Q3: key_numbers の cross-validation 0% でもハルシネーション検出が機能するか
+A3: Phase B では確認できず（これは Phase D の責務）
+    Phase D 実装後に再検証
+```
+
+**判断**: v1.7 dedup 改善の優先度は **中程度**。
+Phase C/D の実装が進んだ後、改めて判断材料を共有する。
+
+### 23.7 次のフェーズへの引き継ぎ事項
+
+```
+Phase C （対話生成、並列 LLM コール）への影響:
+- ShowSpec を input に各 segment を並列生成
+- 32K context 制約は引き続き考慮
+- intro + topic_1 + topic_2 + topic_3 + conclusion = 5 並列の予定
+- 各 segment への structured_facts 渡し方の設計が必要
+
+Phase D （品質ゲート）への影響:
+- AAA 偏重の検証ロジックを設計
+- highly_specific フラグの台本中検出
+- structured_facts と台本の整合性検証
+```
 
 ---
 
