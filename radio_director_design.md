@@ -1,9 +1,9 @@
 # radio_director 設計仕様書
 
-**バージョン**: 1.3.0
+**バージョン**: 1.4.0
 **作成日**: 2026-05-07
 **最終更新**: 2026-05-08
-**ステータス**: Phase A・B プロトタイプ完成 / Phase C 設計準備完了
+**ステータス**: Phase A・B・C プロトタイプ完成 / Phase D 設計準備完了
 **対象**: Mac Studio で構築する新台本生成パイプライン `radio_director`
 **経緯**: 既存 `auto_radio_generator` (Windows) のコードベース肥大化と複数の改善試行失敗を踏まえ、ゼロベース再設計
 
@@ -1744,6 +1744,7 @@ v1.6 完成後の活用:
 | 1.1.0 | 2026-05-07 | research_pipeline 側の v1.6 実装が当初予定（5/9末）より2日前倒しで完了。実機データを受領し設計に反映（セクション 21） |
 | 1.2.0 | 2026-05-08 | radio_director Phase A プロトタイプ完成（28/28 PASS、実機データで sufficient 判定）。research_pipeline からの Phase B 設計向け事前情報を受領し記録（セクション 22）。トークン数肥大化対策、priority スコア付与の設計判断、angle 不整合対応方針を確定 |
 | 1.3.0 | 2026-05-08 | radio_director Phase B プロトタイプ完成（53/53 ユニット PASS、1/1 統合 PASS、114秒で完走）。実機データで end-to-end 動作確認（セクション 23）。重要な発見: vLLM max_model_len=32,768 制約、LLM の AAA tier 選好。設計妥当性が確認された5項目を記録 |
+| 1.4.0 | 2026-05-08 | radio_director Phase C プロトタイプ完成（83/83 PASS、115秒で 5 segment 並列生成）。実機検証で並列効果 62%（目標 50% 超過達成）、フォールバック発動なし、対話品質目視確認 OK（セクション 24）。ハルシネーション兆候なし、structured_facts 主軸の制約が完全に機能。残課題は conclusion の出典タグ整合性のみ（Phase D で対処）。v1.7 dedup 改善の優先度を「低」に下方修正 |
 
 ---
 
@@ -2181,6 +2182,264 @@ Phase D （品質ゲート）への影響:
 - AAA 偏重の検証ロジックを設計
 - highly_specific フラグの台本中検出
 - structured_facts と台本の整合性検証
+```
+
+---
+
+## 24. Phase C プロトタイプ実機検証結果（2026-05-08）
+
+Phase C プロトタイプ完成後、実機 LLM (Qwen3.5-122B-A10B-NVFP4) で
+end-to-end (Phase A → B → C) 検証を実施。
+
+### 24.1 検証実行サマリ
+
+```
+実行環境:
+- vLLM (Mac Studio Proxy 経由 / GX10)
+- Qwen3.5-122B-A10B-NVFP4
+- max_model_len: 32,768
+- max-num-seqs: 8
+- max_workers: 4 (Phase C ThreadPoolExecutor)
+
+入力: research_brief_20260507_230040.json (Phase A 入力)
+テーマ: 睡眠と免疫
+angle: 寝不足が『風邪』を呼ぶ？睡眠時間が免疫細胞の数を劇的に減らす最新データ
+```
+
+### 24.2 並列実行の効果（仕様書 §13.5 目標を超過達成）
+
+| 指標 | 値 | 備考 |
+|---|---|---|
+| total_elapsed_sec | 115.3 | Phase C のみ |
+| 直列推定 | 301.2 | 各 segment を sequential 実行した場合の試算 |
+| 削減率 | **62%** | 仕様 §13.5 目標 50% を上回る |
+| segments_count | 5 | intro + 3 deep_dive + conclusion |
+| total_turns | 65 | 各 segment の合計対話ターン数 |
+
+**目標超過の要因（推定）**:
+- vLLM の連続バッチング・PagedAttention の効率
+- max-num-seqs=8 に対して max_workers=4 で並列度が確保されている
+- per-segment prompt が 1.5K-2.3K chars と小さく、KV cache の負荷が低い
+
+### 24.3 各 segment の所要時間と出力サイズ
+
+| segment | elapsed (s) | prompt_chars | output_chars | 推定 turns |
+|---|---|---|---|---|
+| intro | 38.5 | 1,182 | 927 | ~12 |
+| deep_dive_0 | 64.5 | 1,133 | 1,614 | ~20 |
+| deep_dive_1 | 88.2 | 1,187 | 2,279 | ~28 |
+| deep_dive_2 | 82.9 | 1,240 | 2,254 | ~28 |
+| conclusion | 27.1 | 2,315 | 836 | ~10 |
+
+**所感**:
+- deep_dive_1 (88.2s) が並列バッチの bottleneck
+- conclusion は prior segments を要約として受け取るため prompt が大きい (2,315 chars)
+  だが出力は短い (836 chars)
+- 全 attempt=1 で初回成功、retry/fallback 発動なし
+  → モデル安定性が高く、structured_facts 主軸 + JSON モードが機能
+
+### 24.4 対話品質の評価（目視確認）
+
+#### キャラクター性: ⭐⭐⭐⭐⭐ 完璧
+
+```
+A (ずんだもん):
+  ✅ 「のだー」「のだ」「だなのだ！」
+  ✅ 視聴者代表として「えっ」「すごい」と驚く役
+  ✅ 好奇心旺盛、子供っぽい疑問を投げる
+
+B (四国めたん):
+  ✅ 「ですわ」「ですわね」「のですよ」
+  ✅ 解説役として数値・出典を根拠に説明
+  ✅ 専門知識を分かりやすく伝える
+```
+
+二人の役割分担が明確で、A が問い・B が答える構造が完全に機能。
+
+#### 出典タグ: ⭐⭐⭐⭐ 機能している（揺らぎあり）
+
+```
+deep_dive_0: [16][AAA] が3回出現
+deep_dive_1: [src=9][AAA][medium], [src=1][AAA][medium], [src=6][AAA][high]
+deep_dive_2: [6][AAA], [1][AAA], [16][AAA]
+conclusion: [16][AAA], [src=9][AAA][medium], [B]
+```
+
+**観察**: タグ表記に揺らぎあり。
+- 完全な形式: `[src=9][AAA][medium]`
+- 簡略形式: `[16][AAA]` または `[B]`
+
+これはプロンプトの表記例（`[src={c.source_idx}][{c.source_tier}][{c.confidence}]`）に
+LLM が厳密に従う場合と、簡略化する場合が混在している証拠。
+
+**対策**: Phase D の検証ロジックで正規化するか、プロンプトを更に強化する。
+
+#### structured_facts 主軸: ⭐⭐⭐⭐⭐ 機能している
+
+具体的な引用例:
+```
+- 「NK細胞の活性が70%低下」 → key_claims にあった事実
+- 「英国バイオバンク研究、対象者380,182人」 → 出典 [6][AAA] 付き
+- 「うつ病有病率 14.1ポイント増加」「12.9ポイント増加」 → 出典 [1][AAA]
+- 「IL-6, TNF-alpha, CRP」 → 専門用語が正確
+- 「白内障 1.17倍、緑内障 1.21倍」 → 出典 [6][AAA][high]
+```
+
+これらは全て research_brief.json の structured_facts.key_numbers に存在する数値。
+**ハルシネーションの兆候は見当たらず**。
+
+#### thinking 漏出: ⭐⭐⭐⭐⭐ なし
+
+```
+✅ 「ええと」「考えてみると」「私の解釈では」
+   のような思考過程は見当たらない
+✅ JSON モードと parser の strip_think_tags が効いている
+```
+
+#### 自然な対話の流れ: ⭐⭐⭐⭐⭐ 良好
+
+```
+✅ intro でフック → topic 紹介 → conclusion で振り返り
+✅ deep_dive 内で「驚き → 解説 → 深掘り → まとめ」のミニアーク
+✅ 視聴者を引き込む質問形式が機能（「えっ、p<0.01 だって！？」など）
+```
+
+#### angle の貫通: ⭐⭐⭐⭐⭐ 完全遵守
+
+```
+入力 angle: 「寝不足が『風邪』を呼ぶ？睡眠時間が免疫細胞の数を劇的に減らす最新データ」
+
+intro: angle をそのまま強調的に展開
+deep_dive 群: 各 topic で angle に沿った深掘り
+conclusion: angle に立ち戻ってまとめ
+
+→ 再解釈・改変なし、§16 注意事項4 完全遵守
+```
+
+#### deep_dive のトーン差別化: ⭐⭐⭐⭐ 機能
+
+ShowSpec で各 topic に指定されたトーンが対話に反映:
+
+```
+deep_dive_0: 「驚き」のトーン → 「70%も低下」「戦力崩壊」など驚きの表現
+deep_dive_1: 「議論」のトーン → 「炎症の嵐」「U字型」など分析的
+deep_dive_2: 「解説」のトーン → 「黄金律」「38万人規模」など教育的
+```
+
+各 topic で異なるトーンが感じられる。
+
+### 24.5 軽微な気づき（v1 許容範囲）
+
+#### conclusion での出典タグ整合性
+
+```
+B: 「週末の寝だめでは、平日に失った免疫細胞は決して戻りません [B]」
+```
+
+`[B]` は B tier ソースを示すタグだが、この主張の元 source は `[16][AAA]`
+(deep_dive_2 で同じ内容を引用)。conclusion で**不正確なタグ付け**が発生。
+
+**原因**:
+conclusion プロンプトでは prior_segments を要約として渡しているが、
+key_claims を渡していないため、LLM が tier 情報を自分で書いてしまった可能性。
+
+**対策（Phase D で実装）**:
+- 「conclusion 内の出典タグは prior segments と整合しているか」をチェック
+- または conclusion プロンプトに「出典タグを書く場合は prior segments と一致させる」
+  と明示する
+
+ただし v1 プロトタイプとしては許容範囲。Phase D で正規化・検証する。
+
+### 24.6 設計の妥当性が確認された項目
+
+```
+✅ 並列実行設計が機能（§13.3）
+   - 5 segment のうち 4 を並列、1 (conclusion) を sequential
+   - 削減率 62% で目標 50% を超過
+
+✅ ThreadPoolExecutor + requests (sync) の選択が妥当
+   - max_workers=4 で vLLM の max-num-seqs=8 に対して余裕
+   - 追加依存なし、既存 LLMClient を流用
+
+✅ retry/fallback 設計が機能
+   - max_attempts=3 で全 segment が初回成功（retry 発動なし）
+   - フォールバックテンプレート未発動
+
+✅ Pydantic スキーマ（DialogTurn / ScriptSegment / Script）が機能
+   - turns min_length=4 / segments min/max=4-6 のバリデーション
+
+✅ 共通ヘッダ/フッタ + segment 単位の本体が機能
+   - キャラクター設定・出典タグルールが全 segment で一貫
+   - intro/deep_dive/conclusion ごとの差別化も機能
+
+✅ key_claims を該当 topic のみ渡す方針が機能
+   - deep_dive で正確な引用、ハルシネーションなし
+
+✅ JSON モード + parser の <think> 除去で thinking 漏出を防止
+```
+
+### 24.7 v1.7 dedup 改善の優先度判断（更新）
+
+Phase B (§23.6) で「優先度中程度」と判断したが、Phase C で再検証:
+
+```
+観察:
+- Phase C の対話で confidence の高低を意識した表現の差は見られず
+  (medium も high も同等に「[AAA][medium]」のように引用)
+- LLM は domain_tier を主要な信頼度シグナルとして使っている
+
+結論:
+- 現状の confidence=medium 一択（key_numbers）でも台本品質に影響なし
+- v1.7 dedup 改善の優先度は「低」に下方修正
+- ただし Phase D で「複数ソース確認」を活用したい場合は再評価
+```
+
+### 24.8 次のフェーズへの引き継ぎ事項（Phase D へ）
+
+```
+Phase D（品質ゲート + メタデータ生成）で実装すべき項目:
+
+1. ハルシネーション検出
+   - structured_facts に存在しない数値・固有名詞が台本中にないか
+   - highly_specific 判定ロジック（research_pipeline §3.1.2 の
+     _is_highly_specific を移植）を Phase D に組み込み
+
+2. 出典タグの整合性検証
+   - 台本中の [tier] タグが structured_facts の domain_tier と一致するか
+   - conclusion で prior segments のタグを継承しているか
+
+3. 出典タグの正規化
+   - [16][AAA] と [src=9][AAA][medium] のような揺らぎを統一形式に変換
+
+4. メタデータ生成
+   - title, description, hashtags, chapters
+   - Phase B の ShowSpec.title を流用 + 拡張
+   - estimated_turns から chapter timestamp を計算
+
+5. 自動修正
+   - high/medium severity の問題を自動修正
+   - low severity は警告のみ
+
+6. 出力スキーマ
+   - VerifiedScript（検証済み Script）+ VideoMetadata
+   - Script.metadata を拡張、または別オブジェクトとして管理
+```
+
+### 24.9 radio_director 全体の進捗
+
+```
+✅ Phase A: 完成（リサーチ品質層、決定論的）
+✅ Phase B: 完成（番組企画、1 LLM コール）
+✅ Phase C: 完成（対話生成、並列 LLM コール）  ← NEW
+⏸ Phase D: 未着手（品質ゲート + メタデータ）
+
+End-to-End 動作確認済み:
+- Phase A: 0.06 秒（決定論的）
+- Phase B: 114 秒（1 LLM コール）
+- Phase C: 115 秒（5 LLM コール、並列 4 + 順次 1）
+- 合計: 約 4 分で番組台本が完成
+
+Phase D 完成後、Phase A〜D で完全な radio_director パイプラインとなる。
 ```
 
 ---
