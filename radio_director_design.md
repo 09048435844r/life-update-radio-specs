@@ -1747,6 +1747,7 @@ v1.6 完成後の活用:
 | 1.4.0 | 2026-05-08 | radio_director Phase C プロトタイプ完成（83/83 PASS、115秒で 5 segment 並列生成）。実機検証で並列効果 62%（目標 50% 超過達成）、フォールバック発動なし、対話品質目視確認 OK（セクション 24）。ハルシネーション兆候なし、structured_facts 主軸の制約が完全に機能。残課題は conclusion の出典タグ整合性のみ（Phase D で対処）。v1.7 dedup 改善の優先度を「低」に下方修正 |
 | 1.4.1 | 2026-05-08 | research_pipeline チームからの Phase C 完成報告へのフィードバックを §24.10 として記録。STATISTIC_PATTERN 正規表現の共有、Phase D で測定すべきメトリクス2項目（False Positive 率、structured_facts 参照成功率）、_is_highly_specific 移植時の注意点（前段に extract_numbers 関数が必要）、max_model_len 拡張の判断保留（Phase D 設計時に context 必要量を見て再判断）を反映。両チームで v1.7 dedup 改善の優先度・Phase D 完成後の再評価方針が一致 |
 | 1.5.0 | 2026-05-08 | radio_director Phase D プロトタイプ完成（130/130 PASS、E2E 228.7秒で番組台本+メタデータ生成）。重要な発見: false-positive 率 0%（研究側参照値 5.9% を下回る）、citation_tags_inconsistent 0、決定論寄り設計が機能（Phase D は LLM 1コールのみ、17.3秒で完了）。matched_ratio = 0.42 は表記揺れ由来（v2 改善対象）。これにより radio_director v1 プロトタイプが全フェーズ完成、End-to-End で番組台本+メタデータが自動生成される状態になった。研究側への共有メトリクス（§24.10.4 への回答）を §25.9 に記録 |
+| 1.6.0 | 2026-05-09 | Step 1 SSOT 化を実装完了。ShowSpec.thumbnail_title (max_length=15) を新設、VideoMetadata に SourceRef + thumbnail_title + references を追加、Phase D で実引用 source_idx から references を機械的に解決（LLM コール追加なし）、Phase B planner に max_attempts=2 retry を導入、output/<run_id>/ ディレクトリ構造で 5 artifact を保存する runner.run_pipeline を新設。VerifiedScript 1 ファイルで Windows 側引き渡しに必要な情報を完結（CleanedResearch を Windows 側が読まなくても良い状態）。Append-Only 原則で既存テスト・既存 Phase D 統合テストはすべて維持。詳細は §26 を参照 |
 
 ---
 
@@ -2930,6 +2931,69 @@ radio_director Phase A〜D 全プロトタイプが完成した。
 - Claude Code の plan モード活用（設計判断を可視化してレビュー）
 - 実機データで判断する原則（仮説に固執せず、観察を優先）
 ```
+
+---
+
+## 26. Step 1 SSOT 化（2026-05-09）
+
+Phase A〜D の v1 プロトタイプ完成後、Windows 側 auto-radio-generator への引き渡しを「VerifiedScript 1 ファイル」に集約するため Step 1 SSOT 化を実施した。
+
+### 26.1 背景と目的
+
+これまでは radio_director の出力 artifact が CleanedResearch（in-memory）と VerifiedScript（in-memory）に分かれており、Windows 側 loader が両方を理解する必要があった。Step 1 では:
+
+- Windows 側 loader が VerifiedScript 1 ファイルだけ読めば動画化に必要な情報がすべて揃う
+- CleanedResearch は Mac 側のローカル監査ログ扱い（Windows 側は読まない）
+- メタデータ部の意味判断は radio_director に集約（Windows 側 loader は機械的変換のみ）
+
+### 26.2 スキーマ変更
+
+**ShowSpec** (`models/show_spec.py`):
+- `thumbnail_title: str` (max_length=15, min_length=1, 必須) を追加
+- Phase B が title と並行で生成、サムネ用短縮表現として独立して意味が通る自然な日本語
+
+**VideoMetadata** (`models/video_metadata.py`):
+- `thumbnail_title: str` (max_length=15) を追加（ShowSpec から機械的コピー）
+- `references: list[SourceRef]` を追加（default 空 list）
+- 新規 `SourceRef` (`url: HttpUrl, title: str | None, tier: Literal[...]`) を導入し、軽量な引用ソース参照型として定義
+
+**VerifiedScript** (`models/verified_script.py`):
+- 構造変更なし。`metadata: VideoMetadata` 経由で新フィールドを内包
+
+### 26.3 Phase 別の処理変更
+
+**Phase B**:
+- プロンプトと JSON schema hint に thumbnail_title 出力指示を追加
+- planner に max_attempts=2 の retry を導入（thumbnail_title 15 字制約違反を 1 回吸収）
+
+**Phase D**:
+- `generate_metadata` シグネチャ拡張: `(script, cleaned_research?, citation_findings?, *, client=...)`
+- thumbnail_title は ShowSpec から機械的コピー（**LLM コール追加禁止** Guardrail）
+- references は citation_normalizer の出力 (`is_consistent=True` なものだけ) から source_idx を抽出し、`cleaned_research.sources[idx-1]` をルックアップして SourceRef リストを構築
+- URL ベースで dedup、HttpUrl 検証失敗・範囲外 source_idx は無視
+
+### 26.4 出力ディレクトリ構造
+
+新規 `output/` モジュールで以下を実現:
+
+```
+~/radio_director/output/<run_id>/
+├── verified_script.json      # ★ Windows 側がコピーする SSOT
+├── cleaned_research.json     # 監査ログ（Windows 側は読まない）
+├── show_spec.json            # 監査ログ
+├── run_metadata.json         # 実行時刻 / phase 別 token 概算
+└── phase_logs/               # raw ログ用ディレクトリ
+```
+
+`run_id` 命名規則: `{YYYY-MM-DD}_{HH-MM}_{theme_slug}` （日本語 theme は ASCII 化できず 'theme' フォールバック、重複時は `_2`/`_3` 付与）。新規 `runner.run_pipeline` が research_brief.json を入力に Phase A→D を直列実行して 5 artifact を保存する。
+
+### 26.5 Append-Only 原則
+
+既存テスト・既存 Phase D 統合テスト (`tests/phase_d/test_integration_llm.py`) は **無変更で維持**。新規 runner 統合テスト (`tests/test_runner_integration_llm.py`) を追加し、本タスクでは冗長性を許容する（重複統合は v2 別タスクで切り分け）。
+
+### 26.6 確定要件との矛盾解決
+
+指示書に `~/radio_director/docs/interface_spec.md` の更新指示があったが、仕様書の実体は `~/life-update-radio-specs/`（別リポジトリ、SSOT 共有用）にある。アーキテクト判断で `~/life-update-radio-specs/` 側を更新する方針に確定（research_pipeline 等の他リポジトリとの仕様共有を維持するため）。
 
 ---
 
