@@ -1,9 +1,9 @@
 # radio_director 設計仕様書
 
-**バージョン**: 1.1.0
+**バージョン**: 1.2.0
 **作成日**: 2026-05-07
-**最終更新**: 2026-05-07
-**ステータス**: 設計確定 / 実装着手準備完了
+**最終更新**: 2026-05-08
+**ステータス**: Phase A プロトタイプ完成 / Phase B 設計準備完了
 **対象**: Mac Studio で構築する新台本生成パイプライン `radio_director`
 **経緯**: 既存 `auto_radio_generator` (Windows) のコードベース肥大化と複数の改善試行失敗を踏まえ、ゼロベース再設計
 
@@ -1742,6 +1742,7 @@ v1.6 完成後の活用:
 | 0.5.0 | 2026-05-07 | research_pipeline チームとの v1.6 合意事項、品質ゲートと再リサーチの設計を追加（セクション 16-18） |
 | 1.0.0 | 2026-05-07 | v1.6 最終合意事項を反映、ハードウェア前提・データ共有パッケージ・役割分担を確定（セクション 19）。GitHub 管理開始 |
 | 1.1.0 | 2026-05-07 | research_pipeline 側の v1.6 実装が当初予定（5/9末）より2日前倒しで完了。実機データを受領し設計に反映（セクション 21） |
+| 1.2.0 | 2026-05-08 | radio_director Phase A プロトタイプ完成（28/28 PASS、実機データで sufficient 判定）。research_pipeline からの Phase B 設計向け事前情報を受領し記録（セクション 22）。トークン数肥大化対策、priority スコア付与の設計判断、angle 不整合対応方針を確定 |
 
 ---
 
@@ -1893,6 +1894,167 @@ Phase A 品質ゲート (radio_director):
    （同等のロジックを台本中の発言にも適用するため）
 3. v1.7 dedup 改善の議論を radio_director の Phase A プロトタイプ完成後に開始したい
 ```
+
+---
+
+## 22. Phase B 設計向け事前情報（research_pipeline からの先回り共有 / 2026-05-08）
+
+Phase A プロトタイプ完成（28/28 PASS）後、研究側から Phase B 設計に必要な
+事前情報を3点共有された。Phase B 実装前に必ず確認すべき内容として記録。
+
+### 22.1 structured_facts フィールドの詳細仕様
+
+仕様書 §3.1.1/§3.1.2 では基本構造のみ記載。Phase B プロンプトで具体的な
+引用方法を設計する際に必要な詳細:
+
+```
+key_numbers.context:
+  最大100文字程度、数値が登場した文脈の要約
+
+key_entities.type:
+  LLM が自由生成する文字列（enum 化されていない）
+  例: concept / organization / material / person / institution / etc.
+  → Phase B 側で type を見て分岐する場合は柔軟な処理が必要
+  → 厳密な enum マッチングは避ける
+
+surprising_claims.statement:
+  LLM が抽出した「意外性のある主張」
+  150〜300文字程度の自然文
+
+controversies:
+  statement_a vs statement_b の対立構造
+  source_indices_a / source_indices_b で別ソース紐付け
+```
+
+### 22.2 トークン数肥大化への対策（最重要）
+
+**問題**:
+structured_facts を全件 Phase B に渡すと、トークン数が肥大化する。
+実機データでは 116 fact = 大量のテキスト。
+
+```
+内訳例（実機データ）:
+  key_numbers:       34件 × 平均 100字
+  key_entities:      77件 × 平均 80字
+  surprising_claims:  5件 × 平均 200字
+  controversies:      0件
+  
+合計: 約 10,000-15,000 字（プロンプト全体ではさらに増える）
+```
+
+**研究側からの選定提案**:
+1. confidence=high を優先抽出
+2. 残り枠で domain_tier=AAA/AA から選定
+3. controversies は別枠で全件渡す（ハルシネーション防止に効果大）
+
+**radio_director 側の設計判断: 優先度付与 + 選定の中間案を採用**
+
+```
+選択肢:
+A. 選定を Phase A 出口で行う → CleanedResearch を絞る
+   メリット: Phase B プロンプトがシンプル
+   デメリット: Phase A の責務増、選定情報の損失
+
+B. 選定を Phase B 入口で行う → CleanedResearch は全件保持
+   メリット: Phase A が情報損失なく純粋
+   デメリット: Phase B のロジックが複雑
+
+C. 中間案: Phase A は priority スコアを付与、Phase B が top-K を選ぶ
+   メリット: 情報損失なし + Phase B のロジックが単純
+   デメリット: priority 計算ロジックが Phase A に必要
+```
+
+**採用: C（中間案）**
+
+理由:
+- Phase A の責務を「品質判定 + 優先度付与」と再定義
+- 選定の閾値判断は Phase B に残し、後で調整しやすくする
+- top-K の K は実機データで決定（最初は 30-50 程度を目安）
+
+### 22.3 priority スコアの付与ロジック（Phase A 拡張案）
+
+```python
+def calculate_priority(fact: ResolvedFact) -> int:
+    """fact の優先度スコアを計算（高いほど重要）"""
+    score = 0
+    
+    # confidence による加点
+    if fact.confidence == "high":
+        score += 100
+    elif fact.confidence == "medium":
+        score += 50
+    
+    # tier による加点
+    tier_score = {"AAA": 50, "AA": 40, "A": 30, "B": 10}
+    score += tier_score.get(fact.primary_source_tier, 0)
+    
+    # cross_validated による加点
+    score += min(len(fact.cross_validated_sources) * 10, 50)
+    
+    # needs_review はマイナス
+    if fact.needs_review:
+        score -= 100
+    
+    return score
+```
+
+これは将来 Phase A の拡張として実装する想定。**現時点の Phase A プロトタイプには未実装**。
+
+### 22.4 angle と structured_facts の不整合対応
+
+**問題**:
+研究側で生成した angle は structured_facts のすべてをカバーしていない。
+特に Gap-fill で追加された記事から抽出された fact は、初期の angle から
+外れた内容を含む可能性がある。
+
+**対応方針の選択肢**:
+```
+A. 関連性スコアリングで上位のみ採用（厳格）
+B. メイン構成は関連 fact、補足エピソードに無関係 fact を回す（柔軟）
+C. 全件採用、Phase B プロンプトで「angle 中心に」と指示するだけ（LLM任せ）
+```
+
+**radio_director 側の決定: C → B の段階的アプローチ**
+
+第1段階（Phase B プロトタイプ）: C
+- 全件採用、プロンプトで「angle 中心に」と指示
+- 実機データで挙動を観察
+- 過剰最適化を避ける（Yuru-Stoic）
+
+第2段階（実機データの結果次第）: B
+- もし無関係な fact が台本に混入するパターンが見えたら B に移行
+- メイン構成 vs 補足エピソードの分離ロジックを実装
+
+### 22.5 Phase B 完成時の実機検証項目
+
+研究側との情報共有のため、Phase B プロトタイプ完成時に以下を測定する:
+
+```
+1. トークン数の実測
+   - 116 fact 全件渡しのプロンプト総トークン数
+   - 選定後（top-K）のプロンプト総トークン数
+   - 両者の差異と Phase B 出力品質の比較
+
+2. structured_facts の利用パターン
+   - どの fact が実際に台本に組み込まれたか
+   - confidence/tier ごとの採用率
+   - controversies の使用率（ハルシネーション防止効果の検証）
+
+3. angle 関連性スコアリングの効果
+   - Gap-fill 由来 fact の使用率
+   - 無関係 fact が混入したか
+   - 第1段階（C）vs 第2段階（B）の比較根拠
+```
+
+これらが揃えば v1.7 改善の方向性がさらに明確になる。
+
+### 22.6 設計仕様書への影響
+
+本セクション追加に伴い、§13.2 (Phase B のプロンプト設計) と §13.5 (全体の
+効果試算) を Phase B 実装時に更新する。具体的には:
+
+- §13.2: トークン数肥大化対策と選定ロジックの追記
+- §13.5: トークン数の見積もりを追加（116 fact × 平均長 → 概算）
 
 ---
 
