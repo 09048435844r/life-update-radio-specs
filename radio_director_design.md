@@ -1,9 +1,9 @@
 # radio_director 設計仕様書
 
-**バージョン**: 1.4.0
+**バージョン**: 1.4.1
 **作成日**: 2026-05-07
 **最終更新**: 2026-05-08
-**ステータス**: Phase A・B・C プロトタイプ完成 / Phase D 設計準備完了
+**ステータス**: Phase A・B・C プロトタイプ完成 / Phase D 設計準備完了（研究側フィードバック反映済み）
 **対象**: Mac Studio で構築する新台本生成パイプライン `radio_director`
 **経緯**: 既存 `auto_radio_generator` (Windows) のコードベース肥大化と複数の改善試行失敗を踏まえ、ゼロベース再設計
 
@@ -1745,6 +1745,7 @@ v1.6 完成後の活用:
 | 1.2.0 | 2026-05-08 | radio_director Phase A プロトタイプ完成（28/28 PASS、実機データで sufficient 判定）。research_pipeline からの Phase B 設計向け事前情報を受領し記録（セクション 22）。トークン数肥大化対策、priority スコア付与の設計判断、angle 不整合対応方針を確定 |
 | 1.3.0 | 2026-05-08 | radio_director Phase B プロトタイプ完成（53/53 ユニット PASS、1/1 統合 PASS、114秒で完走）。実機データで end-to-end 動作確認（セクション 23）。重要な発見: vLLM max_model_len=32,768 制約、LLM の AAA tier 選好。設計妥当性が確認された5項目を記録 |
 | 1.4.0 | 2026-05-08 | radio_director Phase C プロトタイプ完成（83/83 PASS、115秒で 5 segment 並列生成）。実機検証で並列効果 62%（目標 50% 超過達成）、フォールバック発動なし、対話品質目視確認 OK（セクション 24）。ハルシネーション兆候なし、structured_facts 主軸の制約が完全に機能。残課題は conclusion の出典タグ整合性のみ（Phase D で対処）。v1.7 dedup 改善の優先度を「低」に下方修正 |
+| 1.4.1 | 2026-05-08 | research_pipeline チームからの Phase C 完成報告へのフィードバックを §24.10 として記録。STATISTIC_PATTERN 正規表現の共有、Phase D で測定すべきメトリクス2項目（False Positive 率、structured_facts 参照成功率）、_is_highly_specific 移植時の注意点（前段に extract_numbers 関数が必要）、max_model_len 拡張の判断保留（Phase D 設計時に context 必要量を見て再判断）を反映。両チームで v1.7 dedup 改善の優先度・Phase D 完成後の再評価方針が一致 |
 
 ---
 
@@ -2440,6 +2441,172 @@ End-to-End 動作確認済み:
 - 合計: 約 4 分で番組台本が完成
 
 Phase D 完成後、Phase A〜D で完全な radio_director パイプラインとなる。
+```
+
+### 24.10 research_pipeline チームからのフィードバック（2026-05-08 受領）
+
+Phase C 完成報告を受けて、研究側から以下のフィードバックを受領した。
+Phase D 設計に直接活用するため記録する。
+
+#### 24.10.1 v1.6 設計の振り返り評価
+
+研究側からの評価:
+
+```
+✅ confidence 実装は無駄ではなかった
+   - 出典タグ表示や明示的な品質ゲートで活躍
+   - 人間が見て判断する場面では valuable
+
+⚠️ ただし LLM の自律的判断には domain_tier が支配的
+   - confidence を「読み取って判断するはず」が実機では否定された
+   - これは v1.6 設計時には予想外の発見
+
+💡 v1.7 dedup 改善で confidence=high を増やしても、
+   LLM の挙動は大きく変わらない可能性が高い
+```
+
+これは「実機データで判断する Yuru-Stoic アプローチ」が機能した事例。
+設計仮説が実機で否定されることもあるが、それも前進と捉える姿勢が
+両チームで共有できている。
+
+#### 24.10.2 v1.7 dedup 改善の優先度（両チーム合意）
+
+```
+両チームの認識:
+  研究側: 当面保留、Phase D 完成後に再評価
+  radio_director 側: 「低」に下方修正、Phase D 完成後に再評価
+
+→ 両チーム揃って「Phase D 完成後に再評価」で方針一致
+```
+
+#### 24.10.3 STATISTIC_PATTERN 正規表現の共有
+
+研究側 (`stage2_fetch.py` で使用) からコードレベルで共有:
+
+```python
+# 統計的記述のパターン検出（research_pipeline 側）
+STATISTIC_PATTERN = re.compile(
+    r'\d+\.?\d*\s*[%%‰倍件名人円ドル]'
+    r'|\d+\.?\d*\s*(?:倍|分の|％|‰)'
+    r'|p\s*[<=]\s*\d*\.\d+'
+    r'|95%\s*CI'
+)
+```
+
+カバー範囲:
+- 数値 + 単位（%, 倍, 件, 名, 人, 円, ドル）
+- 統計的有意性（p<0.05, p=0.001）
+- 信頼区間（95%CI）
+
+**radio_director Phase D での活用方針**:
+台本中の数値抽出にこの正規表現を参考実装として使用。
+ただし以下のパターンは radio_director 用にカスタマイズが必要:
+- 「OR=0.207」「HR=2.94」のような表記
+- 「7.0 時間」「3,847 人」のようなコンマ区切り数値
+- 「2.4 億円」「100万件」のような単位込みの大数値
+
+#### 24.10.4 Phase D で研究側が求めるメトリクス（2項目）
+
+研究側が判断材料として求めている数値:
+
+##### A. ハルシネーション検出の False Positive 率
+
+```
+測定内容:
+- _is_highly_specific が台本中の数値で何件発火するか
+- そのうち実際にハルシネーションだったのは何件か
+
+研究側実機データ参照値:
+- false-positive 率 5.9%（116 fact 中 2件で発火、いずれも妥当）
+
+Phase D での測定:
+- 同等の率を測定して比較
+- 台本中の数値出現パターンは構造化データと違うため、別の数字になる想定
+```
+
+##### B. structured_facts への参照成功率
+
+```
+測定内容:
+- 台本中の数値件数（分母）
+- structured_facts.key_numbers と完全一致した件数（分子）
+- 完全一致率 = 分子 / 分母
+
+意義:
+- 高いほどハルシネーション抑制が効いている証拠
+- Phase B/C の structured_facts 主軸制約の有効性を定量化
+```
+
+これらは Phase D の VerifiedScript.metrics に必ず含める。
+
+#### 24.10.5 _is_highly_specific 移植時の注意点
+
+研究側からの注意喚起:
+
+```python
+def _is_highly_specific(value: str) -> bool:
+    """この関数は『数値文字列』を入力に取る設計"""
+```
+
+Phase D で活用する場合、前段に **数値抽出関数** が必要:
+- 入力: 自由テキスト（台本の発話）
+- 出力: 数値文字列のリスト（_is_highly_specific の入力）
+
+`extract_numbers` 的な関数の設計が肝心:
+- 過剰検出を避ける（誤検出は Phase D の品質低下に直結）
+- コンテキスト考慮（OR=、95%CI: 等）
+- 漢数字は別ロジック or 対象外
+
+#### 24.10.6 max_model_len 拡張の判断保留
+
+```
+両チームの認識:
+- Phase C で並列実行が実現したので、max_model_len 拡張の判断材料がそろい始めた
+- Phase D が新たに大量 context を必要としないなら → 現状の 32K で問題なし
+- Phase D 設計時に context 必要量が見えたら → 改めて GX10 のベンチマーク影響含めて議論
+```
+
+**Phase D の context 見積もり（事前計算）**:
+
+```
+入力:
+- Script (Phase C 出力) ~6K chars
+- structured_facts ~10K chars
+- 合計プロンプト: 約 16K chars (~8K tokens)
+
+出力:
+- VerifiedScript + メタデータ ~3-5K chars (~2K tokens)
+
+合計: ~10K tokens で 32K context に余裕
+→ Phase D も 32K で問題なし、max_model_len 拡張不要の見込み
+```
+
+#### 24.10.7 Phase D 設計への反映（実装プロンプトに組み込み）
+
+上記フィードバックを Phase D 実装プロンプトに反映:
+
+1. ハルシネーション検出メトリクスを VerifiedScriptMetrics に組み込み
+2. STATISTIC_PATTERN を参考実装として使用
+3. _is_highly_specific のロジックをそのまま移植
+4. extract_numbers 関数を前段に配置
+5. context 32K で運用、max_model_len 拡張は当面不要
+
+```python
+class VerifiedScriptMetrics(BaseModel):
+    """Phase D の検証メトリクス（研究側との比較用）"""
+    # ハルシネーション検出
+    total_numbers_extracted: int       # 台本中の全数値件数
+    matched_to_structured_facts: int   # key_numbers と完全一致
+    matched_ratio: float               # = matched / total
+
+    highly_specific_count: int         # _is_highly_specific 発火数
+    highly_specific_unmatched: int     # うち key_numbers に存在しなかった数
+    false_positive_candidates: int     # ハルシネーション疑い
+
+    # 出典タグ
+    citation_tags_total: int
+    citation_tags_normalized: int
+    citation_tags_inconsistent: int    # tier 不一致
 ```
 
 ---
