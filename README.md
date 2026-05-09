@@ -49,6 +49,16 @@ Mac Studio で新規構築する台本生成パイプライン `radio_director` 
 - v1.6 実機データを反映した Phase B/D 設計
 - 将来拡張（fill_gaps API、再リサーチ自動化）
 
+## 本運用実行
+
+リサーチから台本生成までの一気通貫実行：
+
+```bash
+~/life-update-radio-specs/run_full.sh --theme "テーマ名"
+```
+
+詳細は `run_full.sh --help` を参照。
+
 ## 仕様変更時のルール
 
 `interface_spec.md` §4 に詳細を記載。要約:
