@@ -56,6 +56,17 @@ source_idx も書くこと」を追加。
 
 **= Step 4 (v2)**
 
+**完了: 2026-05-10 (feature/v2-remove-gemini-script-path → main マージ済)**
+
+実装中の依存関係調査で以下が判明し、Yuru-Stoic 方向に縮退:
+- `services/pipeline/scripting_phase.py`: HITL タブが必須使用 → 物理削除撤回、`@deprecated` 注記のみ
+- `services/pipeline/research_phase.py`: `GeminiClient.create_research_plan` 依存を `queries=[theme]` のシンプル経路に refactor して解消
+- `visual_palette_generator.py` / `image_prompt_generator.py`: production pipeline で使用 → 削除撤回
+- `core/interfaces/script_generator.py` (`IScriptGenerator`): OpenAI/Anthropic/Ollama が実装 → 削除撤回
+
+最終 pytest: 312 passed, 0 failed。外部台本モード E2E 確認済。
+詳細: `auto_radio_generator/docs/step4_implementation_plan.md` (v1.1)
+
 ---
 
 ## 3. サムネイル生成 LLM のローカル化
