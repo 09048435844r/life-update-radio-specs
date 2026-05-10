@@ -77,13 +77,10 @@ echo "🎙️  STAGE 2: radio_director"
 echo "   brief: $BRIEF"
 echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
 
-cd "$DIRECTOR_DIR"
-RUN_DIR="$(.venv/bin/python -c '
-import sys
-from pathlib import Path
-from radio_director.runner import run_pipeline
-print(run_pipeline(Path(sys.argv[1])))
-' "$BRIEF")"
+80  cd "$DIRECTOR_DIR"
+81  RUN_DIR="$(.venv/bin/python -m radio_director "$BRIEF")"
+82  
+83  echo ""
 
 echo ""
 echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
