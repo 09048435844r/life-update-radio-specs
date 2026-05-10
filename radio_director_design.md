@@ -1099,6 +1099,14 @@ async def run_quality_gate(
 
 **合計約 50% 短縮**。さらに重要なのは、**ハルシネーション抑制が構造的に組み込まれている**こと。
 
+### 13.6 max_tokens 決定指針
+
+各 Phase の `max_tokens` は「動く最小値」ではなく、**reasoning + 出力 + JSON wrapper の合計に対して 2× 余裕** を基準に設定する。reasoning モデル (qwen3.5 等) は `<think>` タグでトークンを消費するため、cap ぴったりに当たると JSON が truncate されてパースエラーになる。
+
+実例 (2026-05-09): Phase D メタデータ生成が `max_tokens=2048` 設定下で出力 chars=2054 となり JSON 破断 → `MetadataGenerationError` 発生 → 4096 へ引き上げて解消。
+
+現行値: Phase B=4096, Phase C=3072, Phase D=4096。新規 Phase 追加時は実機初回で出力 chars を計測し、その 2× 以上で固定する。
+
 ---
 
 ## 14. research_pipeline との統合状況（重要な発見）
@@ -1748,6 +1756,7 @@ v1.6 完成後の活用:
 | 1.4.1 | 2026-05-08 | research_pipeline チームからの Phase C 完成報告へのフィードバックを §24.10 として記録。STATISTIC_PATTERN 正規表現の共有、Phase D で測定すべきメトリクス2項目（False Positive 率、structured_facts 参照成功率）、_is_highly_specific 移植時の注意点（前段に extract_numbers 関数が必要）、max_model_len 拡張の判断保留（Phase D 設計時に context 必要量を見て再判断）を反映。両チームで v1.7 dedup 改善の優先度・Phase D 完成後の再評価方針が一致 |
 | 1.5.0 | 2026-05-08 | radio_director Phase D プロトタイプ完成（130/130 PASS、E2E 228.7秒で番組台本+メタデータ生成）。重要な発見: false-positive 率 0%（研究側参照値 5.9% を下回る）、citation_tags_inconsistent 0、決定論寄り設計が機能（Phase D は LLM 1コールのみ、17.3秒で完了）。matched_ratio = 0.42 は表記揺れ由来（v2 改善対象）。これにより radio_director v1 プロトタイプが全フェーズ完成、End-to-End で番組台本+メタデータが自動生成される状態になった。研究側への共有メトリクス（§24.10.4 への回答）を §25.9 に記録 |
 | 1.6.0 | 2026-05-09 | Step 1 SSOT 化を実装完了。ShowSpec.thumbnail_title (max_length=15) を新設、VideoMetadata に SourceRef + thumbnail_title + references を追加、Phase D で実引用 source_idx から references を機械的に解決（LLM コール追加なし）、Phase B planner に max_attempts=2 retry を導入、output/<run_id>/ ディレクトリ構造で 5 artifact を保存する runner.run_pipeline を新設。VerifiedScript 1 ファイルで Windows 側引き渡しに必要な情報を完結（CleanedResearch を Windows 側が読まなくても良い状態）。Append-Only 原則で既存テスト・既存 Phase D 統合テストはすべて維持。詳細は §26 を参照 |
+| 1.6.1 | 2026-05-10 | §13.6「max_tokens 決定指針」を追記。Phase D メタデータ生成が `max_tokens=2048` で truncate して JSON 破断した実例 (2026-05-09) を踏まえ、reasoning + 出力 + JSON wrapper 合計に対して 2× 余裕を基準とするルールを SSOT 化。現行値 (B=4096 / C=3072 / D=4096) を明記 |
 
 ---
 
