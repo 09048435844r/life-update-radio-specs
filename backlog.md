@@ -88,6 +88,19 @@ Mac Studio Proxy (port 11435) → vLLM (Qwen3 系) を呼び出して
 
 **= Step 5 (Step 4 と一緒に着手推奨)**
 
+**完了: 2026-05-10 (commit `24f200d` / auto_radio_generator main)**
+
+`ImagePromptGenerator` の Gemini API 直叩き (`google.genai`) を
+`LLMAdapterFactory.create(config, "ollama")` 経由の Mac Studio Proxy
+(port 11435 → vLLM Qwen3.5-122B) に置換。
+
+- 対象: `services/script_generation/image_prompt_generator.py`
+  - `generate_prompt()` / `generate_thumbnail_prompt()` の両メソッド
+  - `from google import genai` import 完全削除 (静的検査で確認済)
+- フォールバック (`_get_fallback_*_prompt`) は現状維持
+- 新規テスト: `tests/test_image_prompt_generator.py` (+4 件)
+- 既存回帰: `tests/test_thumbnail_regeneration.py` 5 件 PASS
+
 ---
 
 ## 4. 起動時の依存サービス事前チェック
