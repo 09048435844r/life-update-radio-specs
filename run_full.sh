@@ -77,10 +77,10 @@ echo "🎙️  STAGE 2: radio_director"
 echo "   brief: $BRIEF"
 echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
 
-80  cd "$DIRECTOR_DIR"
-81  RUN_DIR="$(.venv/bin/python -m radio_director "$BRIEF")"
-82  
-83  echo ""
+cd "$DIRECTOR_DIR"
+RUN_DIR="$(.venv/bin/python -m radio_director "$BRIEF")"
+  
+echo ""
 
 echo ""
 echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
