@@ -5,7 +5,7 @@
 
 各項目は **対象リポジトリ** を明示。Step 4 以降の計画立案時の参照用。
 
-最終更新: 2026-05-13 (Step 8「Stage II 研究側 fact 品質強化」完了 + Step 9a「Phase B thumbnail 安定化」完了 + §14.3 stochasticity 観察 + Step 10 候補)
+最終更新: 2026-05-15 (Step 10a「関連性フィルタ強化」完了 + Step 10 section §16 新設 + 旧 §15.3 を §16.3 に再配置)
 
 ---
 
@@ -590,6 +590,11 @@ citation_normalizer の出力 (`CitationFinding`) が VideoMetadata.references
 - 中期: 関連性フィルタの cross-lingual 強化 (Stage III A5) / arxiv PDF fallback
   (Stage III A4 / Q5) で article fetch の偽陰性を削減
 
+**追記 (2026-05-14):** 安定性ベンチマークで DGX 以外のテーマ (mindfulness で
+81% → 53% → 47%、sake で 71% → 37%) でも同様の variance を観察。bimodal
+stochasticity は **DGX 固有でなく pipeline 全体の特性**であることが裏付けられた。
+定量化は §16.3 (Step 10c 候補) で対応予定。
+
 ---
 
 ## 15. Step 9: 評価安定化と品質ガード補完 (進行中・部分完了)
@@ -650,6 +655,10 @@ Step 7 → 8 v1 → 8 v2 → postscript で「42% → Phase B fail → Phase B f
 
 ### 15.3 Step 10 候補: stochasticity reduction (計画)
 
+**状態:** 2026-05-14 の STAGE1/2 信頼性調査により Step 10 のスコープが
+「STAGE1/2 信頼性強化」に再定義された。本項目 (stochasticity QA) は
+**§16.3 (Step 10c 候補) に再配置**。詳細は §16 を参照。
+
 **背景:** §14.3 で観察した DGX bimodal 挙動など、pipeline の確率的揺らぎを
 定量化・低減。1 回の高得点 (93%) を「実装済 = 安定」と判断するのは早計。
 
@@ -662,5 +671,137 @@ Step 7 → 8 v1 → 8 v2 → postscript で「42% → Phase B fail → Phase B f
 **着手前提:**
 - Step 9 (§15.2) 完了後の判断
 - variance 測定で「3 回中 N 回 gate pass」のような production-grade な評価軸を確立
+
+**工数目安:** M (1-2 日)、計測回数次第で延伸
+
+---
+
+## 16. Step 10: STAGE1/STAGE2 信頼性強化 (進行中・部分完了)
+
+**対象:** research_pipeline (主に stage1_plan / stage2_fetch)
+**優先度:** 高 (production 信頼性の根幹)
+**発覚:** 2026-05-14 安定性ベンチマーク + STAGE1/2 信頼性調査
+
+### 経緯 (スコープ再定義)
+
+- **2026-05-14 安定性ベンチマーク** (清いテーマ 5 件): 2/5 で Phase A
+  InsufficientResearchError (sleep / blackhole)。「清いテーマ → 通る」と
+  していた前提が否定され、真のボトルネックが research_pipeline 側の
+  **STAGE1 (query 生成) / STAGE2 (fetch + 関連性フィルタ + scoring) の
+  信頼性**であることが判明
+- **STAGE1/2 信頼性調査** (`.investigations/2026-05-14-stage12-reliability.md`):
+  真因確定 — 関連性フィルタ (`_is_relevant`) が失敗 2 ケースで **100% 除外**。
+  `_build_relevance_keywords` が多語結合 strong keyword (「高める方法」「ブラック
+  ホール観測」等) を生成し、記事 snippet と verbatim 一致しない構造的問題。
+  A1 stale-year は副次要因 (H1 toggle 実験で確定)、A8 拒否文言フィルタに
+  盲点 (H6: LLM メタ指示文「Output must be a JSON array...」が通過)
+- **スコープ再定義**: 当初 §15.3 で「Step 10 = stochasticity QA」と
+  していたが、本調査で **「Step 10 = STAGE1/2 信頼性強化」** に再定義。
+  stochasticity QA は §16.3 (Step 10c 候補) に再配置
+
+### マイルストーン (Step 7 → 10a の累積成果)
+
+清いテーマで **4/5 (80%) gate pass**、捏造台本の無検査流通は解消、
+通らない時も Phase A reject / gate fail で**安全停止**する状態に到達。
+本運用再開が可能な水準。
+
+### 16.1 Step 10a: 関連性フィルタ強化 (完了 2026-05-15)
+
+**背景:** STAGE1/2 信頼性調査で特定した 4 系統の問題への対応:
+1. 関連性フィルタの多語結合 strong keyword (主因、H2)
+2. 全件除外時の救済機構なし (H2 症状緩和)
+3. A1 stale-year filter が歴史テーマで誤動作 (副次要因、H1)
+4. A8 拒否文言フィルタの盲点 (新規発見、H6)
+
+**スコープ (4 項目):**
+
+| ID | 内容 | 影響範囲 |
+|---|---|---|
+| **R4** | A8 拒否文言フィルタに LLM メタ指示文パターン追加 (「Output must」「JSON array」「以下のJSON」等 14 パターン) | stage1_plan (config) |
+| **A1'** | stale-year filter で歴史年代マーカー (X年代 / X世紀 / 元号X年/時代/の) を除外 | stage1_plan |
+| **R1** | `_build_relevance_keywords` を **janome 形態素分割**で強化 (連結句を解体、既存 split と UNION)。`PHASE_B_*` の影響を回避するため Stage2 側で完結 | stage2_fetch |
+| **R3** | 関連性フィルタの緊急 fallback (level 2: weak 閾値 2→1 / level 3: domain_score 上位 N 強制採用)。フィルタ完全スキップはしない | stage2_fetch |
+
+**コミット (4 本、research_pipeline main):**
+- `6ec4aa3` fix(stage1_plan): A8 拒否文言フィルタに LLM メタ指示文パターン追加 (R4)
+- `19c5ec8` fix(stage1_plan): stale-year filter で歴史年代表記を除外 (A1')
+- `fd8a607` feat(stage2_fetch): _build_relevance_keywords を形態素分割で強化 (R1)
+- `e50a529` feat(stage2_fetch): 関連性フィルタに緊急 fallback を追加 (R3)
+
+**新規依存:** **janome 0.5.0** (pure-python morphological analyzer、pip 単独で
+system 依存なくインストール可能)。本アーク (Step 7-10a) で初の新規依存だが、
+foundational な関連性フィルタ修正のため正当と判断。heuristic fallback も
+併設 (janome 実行時エラー時の保険)。
+
+**Regression 結果 (5 brief、安定性ベンチマークと同テーマ):**
+
+| label | matched_ratio (前回 → 今回) | 結果 |
+|---|---|---|
+| **sleep** | Phase A reject → **0.757** ★★ | ✅ **決定的救済** |
+| **kojiki** | 0.641 → **0.867** (+23pt) ★ | ✅ 大幅改善 |
+| mindfulness | 0.529 → 0.467 | ✅ pass 維持 (variance 範囲内) |
+| sake | 0.706 → 0.366 | ✅ pass 維持 (variance、§16.3 で追跡) |
+| **blackhole** | Phase A reject → Phase A reject | ❌ 部分的改善 → §16.2 へ |
+
+→ **4/5 gate pass** (前回 3/5)。
+
+**Content quality 検証 (sleep):**
+script.title「眠れないのではなく『質』が悪い？睡眠の質を劇的に高める最新科…」
+で citation 10 件全 normalized、source_attribution_mismatch 1 件のみ。
+前回 Phase A reject → 76% で自然な台本生成、抽象退化なし。
+
+**R1-R4 機能発火状況:**
+- **R1 が主役**: sleep の関連性フィルタが 40/40 (100% 除外) → 64/17 (通過 17 件)
+  に劇的改善。kojiki / mindfulness / sake でも benefit
+- **R3 fallback は 0 件発火**: R1 単独で十分機能、dormant backstop として維持
+- **A1'**: blackhole で queries 数 4 → 8 件改善 (歴史マーカー除外で復活)
+- **R4**: 今回 LLM がメタ指示文を出さず dormant、防御ネットとして残存
+
+**テスト:** research_pipeline 154 tests passed (+56 新規: R4 +15 / A1' +17 /
+R1 +16 / R3 +8)、既存破壊なし。
+
+**詳細レポート:** `.investigations/2026-05-15-step10a-regression.md`
+
+### 16.2 Step 10b 候補: 数値希薄テーマの救済 (要調査)
+
+**背景:** blackhole (「ブラックホール観測の歴史と最新成果」) が Step 10a 後も
+Phase A reject。関連性フィルタは通過 (48 件除外 → 7 件残、R1 機能) するが、
+**Pass1 が key_numbers=0** を返す。
+
+**未確定事項:**
+真因が以下のどれか、まだ切り分けできていない:
+1. 概念中心テーマは数値が記事に乏しい (Pass1 honesty が正常動作)
+2. 通過した 7 記事が topic からズレている (keyword は合うが歴史記事でない)
+3. Pass1 が年号 (1916/1971/2019 等) を数値として拾えていない
+
+「観測の歴史」テーマは本来年号が豊富なはずで、key_numbers=0 は不自然。
+構造的問題の可能性が高い。
+
+**方針:** **gate (Phase A の key_numbers>=1) を反射的に緩めるのではなく、
+まず軽い調査で真因を切り分ける**。Pass1 prompt の改善 / 年号取り扱いの
+修正 / 関連性フィルタの精度向上 のいずれが正解かは調査次第。
+
+**着手前提:** 軽調査 (~1h) で真因を特定してから対応を決定
+
+**工数目安:** 調査次第 (Pass1 prompt 調整なら S、構造的問題なら M)
+
+### 16.3 Step 10c 候補: stochasticity QA (計画) — 旧 §15.3 から再配置
+
+**背景:** §14.3 で観察した DGX bimodal stochasticity に加え、2026-05-14
+安定性ベンチマークで mindfulness (81% → 53% → 47%) / sake (71% → 37%) でも
+同様の variance を観測。同一テーマでも matched_ratio が大きく変動するのが
+pipeline 全体の特性。1 回の高得点 (93%) を「実装済 = 安定」と判断するのは
+早計。
+
+**スコープ案:**
+- 同 brief を 3-5 回再走する benchmark スクリプト
+- 各回の matched_ratio / gate triggered / 失敗モードの variance を測定
+- variance の高いテーマ象限を特定 → 該当する upstream (関連性フィルタ /
+  Pass2 / Stage2 fetch / etc.) のチューニング候補を浮上させる
+- 「3 回中 N 回 gate pass」のような production-grade な評価軸を確立
+
+**着手前提:**
+- Step 10b (§16.2) の判断後
+- 評価軸の整理 (matched_ratio 平均 / 最小 / 完走率 のどれを主指標にするか)
 
 **工数目安:** M (1-2 日)、計測回数次第で延伸
