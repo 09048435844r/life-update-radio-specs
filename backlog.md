@@ -664,6 +664,20 @@ citation_normalizer の出力 (`CitationFinding`) が VideoMetadata.references
 stochasticity は **DGX 固有でなく pipeline 全体の特性**であることが裏付けられた。
 定量化は §16.3 (Step 10c 候補) で対応予定。
 
+### 14.4 VOICEVOX による citation タグ読み上げ問題
+
+- **現象**: verified_script.json の turn テキストに埋め込まれた
+  `[src=N]` タグが VOICEVOX にそのまま渡され、
+  「シルク〇〇」等と読み上げられる
+- **根本原因**: citation タグがテキスト inline に埋め込まれており、
+  TTS 用テキストと出典情報が分離されていない
+- **理想的な修正**: interface_spec.md の turn 構造を
+  `{"text": "...", "citations": [3]}` に変更 (全リポジトリ影響、重い)
+- **軽量な修正**: auto_radio_generator で VOICEVOX に渡す直前に
+  `re.sub(r'\s*\[src=\d+\]', '', text)` で strip (1 行、局所的)
+- **現在の判断**: 軽量修正も含め当面許容、優先度低
+- **着手トリガー**: 音声品質の改善が優先事項になった時点
+
 ---
 
 ## 15. Step 9: 評価安定化と品質ガード補完 (進行中・部分完了)
